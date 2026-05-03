@@ -1,0 +1,8 @@
+flask
+gunicorn
+numpy
+scipy
+scikit-learn
+joblib
+torch
+torchaudio

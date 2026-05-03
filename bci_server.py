@@ -1,6 +1,3 @@
-print("BCI Phone Display Server")
-print("=" * 50)
-
 from flask import Flask, render_template_string, jsonify
 import threading
 import numpy as np
@@ -8,8 +5,12 @@ import joblib
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 import random
 import time
+import os
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -45,17 +46,19 @@ class EEGNet4(nn.Module):
     def _flat(self, nc, nt, F1, D, F2):
         with torch.no_grad():
             x = torch.zeros(1, 1, nc, nt)
-            x = self.block1(x); x = self.block2(x)
+            x = self.block1(x)
+            x = self.block2(x)
             x = self.block3(x)
             return x.view(1, -1).shape[1]
 
     def forward(self, x):
-        x = self.block1(x); x = self.block2(x)
+        x = self.block1(x)
+        x = self.block2(x)
         x = self.block3(x)
         return self.classifier(x.view(x.size(0), -1))
 
 # ══════════════════════════════════════════════════════════════
-# P300 simulation
+# P300 simulation + features
 # ══════════════════════════════════════════════════════════════
 SFREQ     = 256
 EPOCH_LEN = 0.6
@@ -66,7 +69,8 @@ def generate_p300_epoch(is_target):
     t     = np.linspace(0, EPOCH_LEN, N_SAMPLES)
     epoch = np.zeros((N_CH, N_SAMPLES))
     for ch in range(N_CH):
-        alpha  = 3e-6 * np.sin(2*np.pi*10*t + np.random.rand()*2*np.pi)
+        alpha  = 3e-6 * np.sin(
+            2*np.pi*10*t + np.random.rand()*2*np.pi)
         noise  = 2e-6 * np.random.randn(N_SAMPLES)
         signal = alpha + noise
         if is_target:
@@ -92,8 +96,8 @@ def extract_rich_features(epochs):
                 w = sig[s:e]
                 feat.extend([w.mean(), w.max(),
                               w.min(), np.abs(w).mean()])
-            p3  = sig[int(0.30*SFREQ):int(0.50*SFREQ)].mean()
-            b   = sig[int(0.00*SFREQ):int(0.15*SFREQ)].mean()
+            p3 = sig[int(0.30*SFREQ):int(0.50*SFREQ)].mean()
+            b  = sig[int(0.00*SFREQ):int(0.15*SFREQ)].mean()
             feat.append(p3 - b)
             feat.append(np.argmax(
                 sig[int(0.20*SFREQ):int(0.55*SFREQ)]) / SFREQ)
@@ -103,27 +107,65 @@ def extract_rich_features(epochs):
     return np.array(features)
 
 # ══════════════════════════════════════════════════════════════
-# Load models
+# Load or train models at startup
 # ══════════════════════════════════════════════════════════════
-print("\n[1/3] Loading models...")
+print("Starting BCI server...")
 device = torch.device('cpu')
 
-ck = torch.load(
-    r'C:\Users\SHISHIR\Desktop\BCI Project\eegnet_4class.pth',
+# Try loading saved models first
+# If not found, train fresh ones (cloud deployment)
+eegnet    = None
+lda       = None
+ck        = None
+
+MODEL_PATH = os.path.join(os.path.dirname(__file__),
+                          'eegnet_4class.pth')
+P300_PATH  = os.path.join(os.path.dirname(__file__),
+                          'p300_fast.pkl')
+
+CLASS_NAMES = ['Left hand','Right hand','Both hands','Feet']
+MENU_NAMES  = ['Basic needs','Emotions','Actions','People']
+N_CHANNELS  = 64
+N_TP        = 321
+
+if os.path.exists(MODEL_PATH):
+    print("Loading saved EEGNet model...")
+    ck = torch.load(
+    os.path.join(os.path.dirname(__file__), 'eegnet_4class.pth'),
     map_location=device, weights_only=False)
-eegnet = EEGNet4(ck['n_channels'], ck['n_timepoints'],
-                 n_classes=4).to(device)
-eegnet.load_state_dict(ck['model_state'])
-eegnet.eval()
+                    
+    N_CHANNELS = ck['n_channels']
+    N_TP       = ck['n_timepoints']
+    eegnet     = EEGNet4(N_CHANNELS, N_TP, n_classes=4)
+    eegnet.load_state_dict(ck['model_state'])
+    eegnet.eval()
+    print(f"EEGNet loaded! Accuracy: {ck['accuracy']:.2%}")
+else:
+    print("No saved EEGNet — using random simulation")
 
-p300_data = joblib.load(
-    r'C:\Users\SHISHIR\Desktop\BCI Project\p300_fast.pkl')
-lda = p300_data['pipeline']
-
-print("    Models loaded!")
+if os.path.exists(P300_PATH):
+    print("Loading saved P300 model...")
+    p300_data = joblib.load(
+    os.path.join(os.path.dirname(__file__), 'p300_fast.pkl'))
+    lda       = p300_data['pipeline']
+    print(f"P300 LDA loaded! AUC: {p300_data['auc']:.3f}")
+else:
+    print("No saved P300 model — training fresh...")
+    np.random.seed(42)
+    X_list, y_list = [], []
+    for i in range(500):
+        is_t = (i % 5 == 0)
+        X_list.append(generate_p300_epoch(is_t))
+        y_list.append(1 if is_t else 0)
+    X_feat = extract_rich_features(np.array(X_list))
+    y_arr  = np.array(y_list)
+    lda    = Pipeline([('sc', StandardScaler()),
+                       ('lda', LinearDiscriminantAnalysis())])
+    lda.fit(X_feat, y_arr)
+    print("P300 model trained!")
 
 # ══════════════════════════════════════════════════════════════
-# BCI State
+# BCI vocabulary
 # ══════════════════════════════════════════════════════════════
 MENUS = {
     'Basic needs': ['WATER','FOOD','PAIN','TIRED',
@@ -143,42 +185,43 @@ THOUGHT_TO_MENU = {
     3: 'People'
 }
 
-bci_state = {
-    'detected_word':   '',
-    'detected_menu':   '',
-    'confidence':      0.0,
-    'sentence':        [],
-    'history':         [],
-    'status':          'Ready',
-    'processing':      False,
-    'thought_class':   '',
+MENU_COLORS = {
+    'Basic needs': '#534AB7',
+    'Emotions':    '#1D9E75',
+    'Actions':     '#BA7517',
+    'People':      '#D85A30'
 }
 
-def simulate_thought_and_word():
-    """
-    Simulate full BCI pipeline:
-    1. EEGNet detects thought → menu
-    2. P300 detects word in that menu
-    """
-    bci_state['processing'] = True
-    bci_state['status']     = 'Reading brain signals...'
+bci_state = {
+    'detected_word':  '',
+    'detected_menu':  '',
+    'thought_class':  '',
+    'confidence':     0.0,
+    'sentence':       [],
+    'history':        [],
+    'status':         'Ready — tap Detect Thought',
+    'processing':     False,
+}
 
-    # Step 1 — Simulate motor imagery (EEGNet)
+def run_bci_pipeline():
+    bci_state['processing'] = True
+    bci_state['status']     = '🧠 Reading brain signals...'
+
+    # Step 1 — Motor imagery → menu selection
     thought_idx  = random.randint(0, 3)
     menu_name    = THOUGHT_TO_MENU[thought_idx]
-    thought_name = ck['class_names'][thought_idx]
-    bci_state['detected_menu']  = menu_name
-    bci_state['thought_class']  = thought_name
-    bci_state['status']         = f'Thought detected: {thought_name} → {menu_name}'
+    thought_name = CLASS_NAMES[thought_idx]
+    bci_state['detected_menu'] = menu_name
+    bci_state['thought_class'] = thought_name
+    bci_state['status'] = f'Thought: {thought_name} → {menu_name}'
+    time.sleep(0.3)
 
-    time.sleep(0.5)
-
-    # Step 2 — Simulate P300 word selection
+    # Step 2 — P300 → word selection
     words      = MENUS[menu_name]
     target_idx = random.randint(0, 7)
     scores     = np.zeros(8)
 
-    for _ in range(2):   # 2 flash rounds
+    for _ in range(2):
         for idx in range(8):
             epoch = generate_p300_epoch(idx == target_idx)
             feat  = extract_rich_features(
@@ -190,327 +233,459 @@ def simulate_thought_and_word():
     confidence = float(scores[best_idx] / 2)
 
     bci_state['detected_word'] = best_word
-    bci_state['confidence']    = confidence
+    bci_state['confidence']    = round(confidence, 3)
     bci_state['sentence'].append(best_word)
-    bci_state['history'].append({
+    bci_state['history'].insert(0, {
         'word':       best_word,
         'menu':       menu_name,
         'thought':    thought_name,
-        'confidence': f"{confidence:.2f}"
+        'confidence': f"{confidence:.2f}",
+        'color':      MENU_COLORS[menu_name]
     })
-    bci_state['status']     = f'Detected: {best_word}'
+    bci_state['history'] = bci_state['history'][:10]
+    bci_state['status']  = f'✓ Detected: {best_word}'
     bci_state['processing'] = False
 
 # ══════════════════════════════════════════════════════════════
-# Flask web app
+# HTML — beautiful mobile-first UI
 # ══════════════════════════════════════════════════════════════
-print("\n[2/3] Setting up web server...")
-
-app = Flask(__name__)
-
 HTML = """
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>BCI Device</title>
+  <meta name="viewport" content="width=device-width,
+        initial-scale=1, maximum-scale=1">
+  <title>BCI — Thought to Speech</title>
   <style>
-    * { margin:0; padding:0; box-sizing:border-box; }
+    :root {
+      --bg:     #0f0f1a;
+      --card:   #1a1a2e;
+      --border: #2a2a4a;
+      --text:   #e0e0ff;
+      --dim:    #606080;
+      --green:  #00d4aa;
+      --purple: #534AB7;
+      --teal:   #1D9E75;
+      --amber:  #BA7517;
+      --red:    #D85A30;
+    }
+
+    * { margin:0; padding:0; box-sizing:border-box;
+        -webkit-tap-highlight-color:transparent; }
+
     body {
-      background:#0f0f1a;
-      color:#e0e0ff;
-      font-family:'Helvetica Neue', sans-serif;
+      background:var(--bg);
+      color:var(--text);
+      font-family:-apple-system, 'Helvetica Neue', sans-serif;
       min-height:100vh;
-      display:flex;
-      flex-direction:column;
-      align-items:center;
-      padding:20px;
+      padding:16px;
+      max-width:480px;
+      margin:0 auto;
     }
 
-    h1 {
+    /* Header */
+    .header {
+      text-align:center;
+      padding:16px 0 12px;
+    }
+    .header h1 {
       font-size:20px;
-      font-weight:600;
-      color:#a0a0ff;
+      font-weight:700;
+      background:linear-gradient(135deg, #a0a0ff, #00d4aa);
+      -webkit-background-clip:text;
+      -webkit-text-fill-color:transparent;
       margin-bottom:4px;
-      text-align:center;
     }
-
-    .subtitle {
+    .header p {
       font-size:12px;
-      color:#404060;
-      margin-bottom:20px;
-      text-align:center;
+      color:var(--dim);
     }
 
-    /* Status bar */
-    .status-bar {
-      width:100%;
-      max-width:500px;
-      background:#1a1a2e;
-      border-radius:10px;
+    /* Status */
+    .status {
+      background:var(--card);
+      border:1px solid var(--border);
+      border-radius:12px;
       padding:10px 16px;
       font-size:13px;
-      color:#8080b0;
-      margin-bottom:16px;
+      color:var(--dim);
       text-align:center;
-      border:1px solid #2a2a4a;
-    }
-
-    /* Main word display */
-    .word-display {
-      width:100%;
-      max-width:500px;
-      background:#1a1a2e;
-      border-radius:16px;
-      padding:30px 20px;
-      text-align:center;
-      margin-bottom:16px;
-      border:1px solid #2a2a4a;
-    }
-
-    .menu-tag {
-      display:inline-block;
-      font-size:11px;
-      font-weight:500;
-      padding:3px 10px;
-      border-radius:20px;
-      background:#2a2a4a;
-      color:#8080b0;
       margin-bottom:12px;
     }
 
-    .detected-word {
-      font-size:52px;
-      font-weight:700;
-      color:#00d4aa;
-      letter-spacing:2px;
-      margin-bottom:8px;
-      min-height:64px;
+    /* Word card */
+    .word-card {
+      background:var(--card);
+      border:1px solid var(--border);
+      border-radius:16px;
+      padding:24px 16px 20px;
+      text-align:center;
+      margin-bottom:12px;
+      position:relative;
     }
-
-    .confidence-bar-bg {
-      width:100%;
-      background:#0f0f1a;
-      border-radius:6px;
-      height:8px;
-      margin-top:12px;
-    }
-
-    .confidence-bar-fill {
-      height:8px;
-      border-radius:6px;
-      background:linear-gradient(90deg, #534AB7, #00d4aa);
-      transition:width 0.5s ease;
-    }
-
-    .conf-text {
+    .menu-chip {
+      display:inline-block;
       font-size:11px;
-      color:#404060;
-      margin-top:6px;
+      font-weight:600;
+      padding:3px 12px;
+      border-radius:20px;
+      margin-bottom:14px;
+      letter-spacing:0.5px;
     }
-
-    /* Sentence display */
-    .sentence-box {
-      width:100%;
-      max-width:500px;
-      background:#1a1a2e;
-      border-radius:12px;
-      padding:16px;
+    .big-word {
+      font-size:56px;
+      font-weight:800;
+      color:var(--green);
+      letter-spacing:3px;
+      line-height:1;
+      min-height:60px;
       margin-bottom:16px;
-      border:1px solid #2a2a4a;
+      word-break:break-all;
     }
-
-    .sentence-label {
-      font-size:11px;
-      color:#404060;
+    .conf-track {
+      background:var(--bg);
+      border-radius:6px;
+      height:6px;
+      overflow:hidden;
       margin-bottom:6px;
     }
+    .conf-fill {
+      height:100%;
+      border-radius:6px;
+      background:linear-gradient(90deg,var(--purple),var(--green));
+      transition:width 0.6s cubic-bezier(.4,0,.2,1);
+    }
+    .conf-label {
+      font-size:11px;
+      color:var(--dim);
+    }
 
-    .sentence-text {
-      font-size:18px;
+    /* Sentence */
+    .sentence-card {
+      background:var(--card);
+      border:1px solid var(--border);
+      border-radius:14px;
+      padding:14px 16px;
+      margin-bottom:12px;
+    }
+    .sentence-label {
+      font-size:10px;
       font-weight:600;
-      color:#e0e0ff;
+      color:var(--dim);
+      letter-spacing:1px;
+      margin-bottom:6px;
+    }
+    .sentence-text {
+      font-size:20px;
+      font-weight:600;
+      color:var(--text);
       min-height:28px;
+      line-height:1.4;
       word-wrap:break-word;
     }
 
     /* Buttons */
-    .btn-row {
-      display:flex;
+    .btn-grid {
+      display:grid;
+      grid-template-columns:1fr 1fr;
       gap:10px;
-      width:100%;
-      max-width:500px;
-      margin-bottom:16px;
-      flex-wrap:wrap;
-    }
-
-    .btn {
-      flex:1;
-      padding:14px 10px;
-      border:none;
-      border-radius:10px;
-      font-size:13px;
-      font-weight:600;
-      cursor:pointer;
-      transition:opacity 0.2s;
-    }
-    .btn:hover { opacity:0.85; }
-    .btn:active { opacity:0.7; }
-
-    .btn-detect  { background:#534AB7; color:white; }
-    .btn-speak   { background:#1D9E75; color:white; }
-    .btn-delete  { background:#BA7517; color:white; }
-    .btn-clear   { background:#333350; color:#a0a0c0; }
-
-    /* Processing spinner */
-    .processing {
-      display:none;
-      color:#534AB7;
-      font-size:13px;
       margin-bottom:10px;
+    }
+    .btn-grid-3 {
+      display:grid;
+      grid-template-columns:1fr 1fr 1fr;
+      gap:10px;
+      margin-bottom:12px;
+    }
+    .btn {
+      border:none;
+      border-radius:12px;
+      padding:16px 8px;
+      font-size:13px;
+      font-weight:700;
+      cursor:pointer;
+      transition:transform 0.1s, opacity 0.2s;
+      display:flex;
+      flex-direction:column;
+      align-items:center;
+      gap:4px;
+    }
+    .btn:active { transform:scale(0.96); opacity:0.8; }
+    .btn-icon { font-size:20px; }
+    .btn-detect { background:var(--purple); color:white;
+                  grid-column:1/-1; padding:20px; }
+    .btn-speak  { background:var(--teal);  color:white; }
+    .btn-repeat { background:#2a2a4a;      color:#a0a0ff; }
+    .btn-delete { background:var(--amber); color:white; }
+    .btn-clear  { background:#1a1a2e;
+                  border:1px solid var(--border);
+                  color:var(--dim); }
+    .btn-share  { background:#2a2a4a;      color:#a0a0ff; }
+
+    /* Processing state */
+    @keyframes spin {
+      to { transform:rotate(360deg); }
+    }
+    .spinner {
+      display:inline-block;
+      width:16px; height:16px;
+      border:2px solid rgba(255,255,255,0.2);
+      border-top-color:white;
+      border-radius:50%;
+      animation:spin 0.8s linear infinite;
+      margin-right:6px;
+      vertical-align:middle;
     }
 
     /* History */
-    .history-box {
-      width:100%;
-      max-width:500px;
-      background:#1a1a2e;
-      border-radius:12px;
+    .history-card {
+      background:var(--card);
+      border:1px solid var(--border);
+      border-radius:14px;
       padding:14px 16px;
-      border:1px solid #2a2a4a;
+      margin-bottom:20px;
     }
-
     .history-label {
-      font-size:11px;
-      color:#404060;
-      margin-bottom:8px;
+      font-size:10px;
+      font-weight:600;
+      color:var(--dim);
+      letter-spacing:1px;
+      margin-bottom:10px;
     }
-
-    .history-item {
+    .hist-item {
       display:flex;
-      justify-content:space-between;
       align-items:center;
-      padding:6px 0;
+      gap:10px;
+      padding:7px 0;
       border-bottom:1px solid #0f0f1a;
-      font-size:12px;
+    }
+    .hist-item:last-child { border-bottom:none; }
+    .hist-dot {
+      width:8px; height:8px;
+      border-radius:50%;
+      flex-shrink:0;
+    }
+    .hist-word {
+      font-size:14px;
+      font-weight:700;
+      flex:1;
+    }
+    .hist-menu {
+      font-size:11px;
+      color:var(--dim);
+    }
+    .hist-conf {
+      font-size:11px;
+      color:var(--dim);
     }
 
-    .history-item:last-child { border-bottom:none; }
-    .hw { color:#00d4aa; font-weight:600; }
-    .hm { color:#534AB7; font-size:11px; }
-    .hc { color:#404060; font-size:11px; }
-
-    /* Speaking animation */
+    /* Online indicator */
+    .online-badge {
+      display:inline-flex;
+      align-items:center;
+      gap:5px;
+      background:#0a2a1a;
+      border:1px solid #1D9E75;
+      border-radius:20px;
+      padding:3px 10px;
+      font-size:11px;
+      color:#1D9E75;
+      margin-bottom:14px;
+    }
+    .online-dot {
+      width:6px; height:6px;
+      border-radius:50%;
+      background:#1D9E75;
+      animation:pulse 2s ease-in-out infinite;
+    }
     @keyframes pulse {
-      0%,100% { opacity:1; }
-      50% { opacity:0.4; }
+      0%,100%{opacity:1} 50%{opacity:0.3}
     }
-    .speaking { animation:pulse 1s ease-in-out infinite; }
   </style>
 </head>
 <body>
 
-<h1>🧠 BCI Thought-to-Speech</h1>
-<p class="subtitle">Brain signals → Words → Voice</p>
+<div class="header">
+  <h1>🧠 BCI Thought-to-Speech</h1>
+  <p>Brain signals → AI → Voice</p>
+</div>
 
-<div class="status-bar" id="status">Ready — press Detect Thought</div>
+<div style="text-align:center;margin-bottom:12px">
+  <span class="online-badge">
+    <span class="online-dot"></span>
+    Live — AI model running
+  </span>
+</div>
 
-<div class="word-display">
-  <div class="menu-tag" id="menu-tag">No menu open</div>
-  <div class="detected-word" id="word-display">---</div>
-  <div class="confidence-bar-bg">
-    <div class="confidence-bar-fill" id="conf-bar" style="width:0%"></div>
+<div class="status" id="status">
+  Ready — tap Detect Thought
+</div>
+
+<!-- Main word display -->
+<div class="word-card">
+  <div class="menu-chip" id="menu-chip"
+       style="background:#2a2a4a;color:#8080b0">
+    No menu open
   </div>
-  <div class="conf-text" id="conf-text">Confidence: ---</div>
+  <div class="big-word" id="big-word">---</div>
+  <div class="conf-track">
+    <div class="conf-fill" id="conf-fill" style="width:0%"></div>
+  </div>
+  <div class="conf-label" id="conf-label">Confidence: ---</div>
 </div>
 
-<div class="sentence-box">
+<!-- Sentence -->
+<div class="sentence-card">
   <div class="sentence-label">SENTENCE</div>
-  <div class="sentence-text" id="sentence-display">Words will appear here...</div>
+  <div class="sentence-text" id="sentence-text">
+    Detected words appear here...
+  </div>
 </div>
 
-<div class="processing" id="processing">
-  ⏳ Reading brain signals...
-</div>
-
-<div class="btn-row">
-  <button class="btn btn-detect" onclick="detectThought()">
-    🧠 Detect Thought
+<!-- Main detect button -->
+<div class="btn-grid" style="margin-bottom:10px">
+  <button class="btn btn-detect" id="detect-btn"
+          onclick="detectThought()">
+    <span class="btn-icon">🧠</span>
+    Detect Thought
   </button>
+</div>
+
+<!-- Action buttons -->
+<div class="btn-grid">
   <button class="btn btn-speak" onclick="speakSentence()">
-    🔊 Speak
+    <span class="btn-icon">🔊</span>
+    Speak Sentence
+  </button>
+  <button class="btn btn-repeat" onclick="repeatWord()">
+    <span class="btn-icon">🔁</span>
+    Repeat Word
   </button>
 </div>
 
-<div class="btn-row">
+<div class="btn-grid-3">
   <button class="btn btn-delete" onclick="deleteLast()">
-    ← Delete
+    <span class="btn-icon">⬅️</span>
+    Delete
   </button>
   <button class="btn btn-clear" onclick="clearAll()">
-    Clear All
+    <span class="btn-icon">🗑️</span>
+    Clear
+  </button>
+  <button class="btn btn-share" onclick="shareSentence()">
+    <span class="btn-icon">📤</span>
+    Share
   </button>
 </div>
 
-<div class="history-box">
+<!-- History -->
+<div class="history-card">
   <div class="history-label">DETECTION HISTORY</div>
   <div id="history-list">
-    <div style="color:#404060;font-size:12px">No detections yet</div>
+    <div style="color:var(--dim);font-size:12px">
+      No detections yet
+    </div>
   </div>
 </div>
 
 <script>
-  let synth = window.speechSynthesis;
+  const synth  = window.speechSynthesis;
+  let lastWord = '';
 
-  function updateDisplay(data) {
+  const MENU_COLORS = {
+    'Basic needs': '#534AB7',
+    'Emotions':    '#1D9E75',
+    'Actions':     '#BA7517',
+    'People':      '#D85A30'
+  };
+
+  function updateUI(data) {
+    // Status
     document.getElementById('status').textContent = data.status;
-    document.getElementById('menu-tag').textContent =
-      data.detected_menu || 'No menu open';
-    document.getElementById('word-display').textContent =
-      data.detected_word || '---';
 
-    let conf = Math.round(data.confidence * 100);
-    document.getElementById('conf-bar').style.width = conf + '%';
-    document.getElementById('conf-text').textContent =
-      'Confidence: ' + conf + '%';
+    // Menu chip
+    const chip  = document.getElementById('menu-chip');
+    const color = MENU_COLORS[data.detected_menu] || '#2a2a4a';
+    chip.textContent       = data.detected_menu || 'No menu open';
+    chip.style.background  = color + '22';
+    chip.style.color       = color || '#8080b0';
+    chip.style.border      = `1px solid ${color}44`;
 
-    let sent = data.sentence.join('  ');
-    document.getElementById('sentence-display').textContent =
-      sent || 'Words will appear here...';
-
-    // Update history
-    let hist = data.history.slice(-5).reverse();
-    let histHtml = '';
-    for (let h of hist) {
-      histHtml += `
-        <div class="history-item">
-          <span class="hw">${h.word}</span>
-          <span class="hm">${h.menu}</span>
-          <span class="hc">conf: ${h.confidence}</span>
-        </div>`;
+    // Big word
+    const wordEl = document.getElementById('big-word');
+    if (data.detected_word && data.detected_word !== wordEl.textContent) {
+      wordEl.style.transform = 'scale(1.15)';
+      setTimeout(() => wordEl.style.transform = 'scale(1)', 300);
     }
-    document.getElementById('history-list').innerHTML =
-      histHtml || '<div style="color:#404060;font-size:12px">No detections yet</div>';
+    wordEl.textContent = data.detected_word || '---';
+    wordEl.style.color = data.detected_word ? '#00d4aa' : '#404060';
+    lastWord = data.detected_word;
+
+    // Confidence
+    const conf = Math.round(data.confidence * 100);
+    document.getElementById('conf-fill').style.width  = conf + '%';
+    document.getElementById('conf-label').textContent =
+      conf > 0 ? `Confidence: ${conf}%` : 'Confidence: ---';
+
+    // Sentence
+    const sent = data.sentence.join('   ');
+    document.getElementById('sentence-text').textContent =
+      sent || 'Detected words appear here...';
+
+    // History
+    let html = '';
+    if (data.history && data.history.length > 0) {
+      for (const h of data.history.slice(0, 6)) {
+        html += `
+          <div class="hist-item">
+            <div class="hist-dot"
+                 style="background:${h.color || '#534AB7'}"></div>
+            <div class="hist-word"
+                 style="color:${h.color || '#e0e0ff'}">${h.word}</div>
+            <div class="hist-menu">${h.menu}</div>
+            <div class="hist-conf">${h.confidence}</div>
+          </div>`;
+      }
+    } else {
+      html = '<div style="color:var(--dim);font-size:12px">' +
+             'No detections yet</div>';
+    }
+    document.getElementById('history-list').innerHTML = html;
+  }
+
+  function setDetectBtn(loading) {
+    const btn = document.getElementById('detect-btn');
+    if (loading) {
+      btn.innerHTML = '<span class="spinner"></span> Reading...';
+      btn.disabled  = true;
+      btn.style.opacity = '0.7';
+    } else {
+      btn.innerHTML = '<span class="btn-icon">🧠</span> Detect Thought';
+      btn.disabled  = false;
+      btn.style.opacity = '1';
+    }
   }
 
   function detectThought() {
-    document.getElementById('processing').style.display = 'block';
-    document.getElementById('status').textContent = 'Reading brain signals...';
+    setDetectBtn(true);
+    document.getElementById('status').textContent =
+      '🧠 Reading brain signals...';
 
-    fetch('/detect', {method: 'POST'})
+    fetch('/detect', {method:'POST'})
       .then(r => r.json())
       .then(data => {
-        document.getElementById('processing').style.display = 'none';
-        updateDisplay(data);
-
-        // Auto speak detected word
-        if (data.detected_word && data.detected_word !== '---') {
-          let utt = new SpeechSynthesisUtterance(
-            data.detected_word.toLowerCase());
-          utt.rate   = 0.9;
-          utt.volume = 1.0;
-          synth.speak(utt);
+        setDetectBtn(false);
+        updateUI(data);
+        // Auto-speak detected word
+        if (data.detected_word) {
+          speak(data.detected_word.toLowerCase());
         }
+      })
+      .catch(() => {
+        setDetectBtn(false);
+        document.getElementById('status').textContent =
+          'Error — try again';
       });
   }
 
@@ -518,40 +693,79 @@ HTML = """
     fetch('/state')
       .then(r => r.json())
       .then(data => {
-        let sentence = data.sentence.join(' ');
-        if (sentence) {
-          let utt = new SpeechSynthesisUtterance(sentence.toLowerCase());
-          utt.rate   = 0.85;
-          utt.volume = 1.0;
-          synth.speak(utt);
+        const sentence = data.sentence.join(' ').toLowerCase();
+        if (sentence.trim()) {
+          speak(sentence);
           document.getElementById('status').textContent =
-            'Speaking: ' + sentence;
+            '🔊 Speaking: ' + sentence.toUpperCase();
         }
       });
+  }
+
+  function repeatWord() {
+    if (lastWord) {
+      speak(lastWord.toLowerCase());
+      document.getElementById('status').textContent =
+        '🔁 Repeating: ' + lastWord;
+    }
   }
 
   function deleteLast() {
     fetch('/delete', {method:'POST'})
       .then(r => r.json())
-      .then(data => updateDisplay(data));
+      .then(data => updateUI(data));
   }
 
   function clearAll() {
     fetch('/clear', {method:'POST'})
       .then(r => r.json())
-      .then(data => updateDisplay(data));
+      .then(data => {
+        updateUI(data);
+        lastWord = '';
+      });
   }
 
-  // Auto refresh state every 2 seconds
+  function shareSentence() {
+    fetch('/state')
+      .then(r => r.json())
+      .then(data => {
+        const text = data.sentence.join(' ');
+        if (navigator.share && text) {
+          navigator.share({title:'BCI Message', text:text});
+        } else if (text) {
+          navigator.clipboard.writeText(text).then(() => {
+            document.getElementById('status').textContent =
+              '📋 Copied to clipboard!';
+          });
+        }
+      });
+  }
+
+  function speak(text) {
+    synth.cancel();
+    const utt    = new SpeechSynthesisUtterance(text);
+    utt.rate     = 0.85;
+    utt.volume   = 1.0;
+    utt.pitch    = 1.0;
+    synth.speak(utt);
+  }
+
+  // Refresh state every 3 seconds
   setInterval(() => {
     fetch('/state')
       .then(r => r.json())
-      .then(data => updateDisplay(data));
-  }, 2000);
+      .then(data => updateUI(data))
+      .catch(() => {});
+  }, 3000);
 </script>
 </body>
 </html>
 """
+
+# ══════════════════════════════════════════════════════════════
+# Flask routes
+# ══════════════════════════════════════════════════════════════
+app = Flask(__name__)
 
 @app.route('/')
 def index():
@@ -560,10 +774,7 @@ def index():
 @app.route('/detect', methods=['POST'])
 def detect():
     if not bci_state['processing']:
-        t = threading.Thread(
-            target=simulate_thought_and_word, daemon=True)
-        t.start()
-        t.join()   # wait for detection to complete
+        run_bci_pipeline()
     return jsonify(bci_state)
 
 @app.route('/state')
@@ -575,9 +786,11 @@ def delete():
     if bci_state['sentence']:
         bci_state['sentence'].pop()
         if bci_state['history']:
-            bci_state['history'].pop()
+            bci_state['history'].pop(0)
     bci_state['detected_word'] = \
-        bci_state['sentence'][-1] if bci_state['sentence'] else ''
+        bci_state['sentence'][-1] \
+        if bci_state['sentence'] else ''
+    bci_state['status'] = 'Word deleted'
     return jsonify(bci_state)
 
 @app.route('/clear', methods=['POST'])
@@ -587,22 +800,9 @@ def clear():
     bci_state['detected_word'] = ''
     bci_state['detected_menu'] = ''
     bci_state['confidence']    = 0.0
-    bci_state['status']        = 'Ready'
+    bci_state['status']        = 'Ready — tap Detect Thought'
     return jsonify(bci_state)
 
-# ══════════════════════════════════════════════════════════════
-# Start server
-# ══════════════════════════════════════════════════════════════
-print("\n[3/3] Starting server...")
-print("\n" + "=" * 50)
-print("  BCI Server is LIVE!")
-print("  Open on THIS computer : http://localhost:5000")
-print("  Open on PHONE/TV      : http://192.168.x.x:5000")
-print("  (replace x.x with your WiFi IP address)")
-print("=" * 50)
-print("\n  To find your WiFi IP — open a NEW terminal and type:")
-print("  ipconfig")
-print("  Look for 'IPv4 Address' under WiFi")
-print("\n  Press Ctrl+C to stop the server")
-
-app.run(host='0.0.0.0', port=5000, debug=False)
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)

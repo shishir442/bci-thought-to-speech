@@ -107,7 +107,7 @@ def extract_rich_features(epochs):
 # ══════════════════════════════════════════════════════════════
 # Load models
 # ══════════════════════════════════════════════════════════════
-print("Starting BCI Keyboard server...")
+print("Starting BCI server...")
 device = torch.device('cpu')
 
 CLASS_NAMES = ['Left hand','Right hand','Both hands','Feet']
@@ -133,7 +133,7 @@ if os.path.exists(MODEL_PATH):
     eegnet.eval()
     print(f"EEGNet loaded — accuracy: {ck['accuracy']:.2%}")
 else:
-    print("No EEGNet model found — using random simulation")
+    print("No EEGNet model found — using simulation")
 
 if os.path.exists(P300_PATH):
     p300_data = joblib.load(P300_PATH)
@@ -155,18 +155,43 @@ else:
     print("P300 model trained!")
 
 # ══════════════════════════════════════════════════════════════
-# Vocabulary
+# Multilingual vocabulary
 # ══════════════════════════════════════════════════════════════
-MENUS = {
-    'Basic needs': ['WATER','FOOD','PAIN','TIRED',
-                    'TOILET','HELP','MEDICINE','SLEEP'],
-    'Emotions':    ['HAPPY','SAD','SCARED','ANGRY',
-                    'LOVED','CALM','LONELY','CONFUSED'],
-    'Actions':     ['YES','NO','STOP','WAIT',
-                    'COME','GO','CALL','REPEAT'],
-    'People':      ['DOCTOR','NURSE','MUM','DAD',
-                    'FAMILY','FRIEND','ANYONE','EMERGENCY']
+LANGUAGES = {
+    'English': {
+        'Basic needs': ['WATER','FOOD','PAIN','TIRED',
+                        'TOILET','HELP','MEDICINE','SLEEP'],
+        'Emotions':    ['HAPPY','SAD','SCARED','ANGRY',
+                        'LOVED','CALM','LONELY','CONFUSED'],
+        'Actions':     ['YES','NO','STOP','WAIT',
+                        'COME','GO','CALL','REPEAT'],
+        'People':      ['DOCTOR','NURSE','MUM','DAD',
+                        'FAMILY','FRIEND','ANYONE','EMERGENCY'],
+    },
+    'Kannada': {
+        'Basic needs': ['ನೀರು','ಊಟ','ನೋವು','ಆಯಾಸ',
+                        'ಶೌಚಾಲಯ','ಸಹಾಯ','ಔಷಧಿ','ನಿದ್ರೆ'],
+        'Emotions':    ['ಖುಷಿ','ದುಃಖ','ಭಯ','ಕೋಪ',
+                        'ಪ್ರೀತಿ','ಶಾಂತ','ಒಂಟಿ','ಗೊಂದಲ'],
+        'Actions':     ['ಹೌದು','ಇಲ್ಲ','ನಿಲ್ಲು','ತಡೆ',
+                        'ಬಾ','ಹೋಗು','ಕರೆ','ಮತ್ತೆ'],
+        'People':      ['ವೈದ್ಯ','ದಾದಿ','ಅಮ್ಮ','ಅಪ್ಪ',
+                        'ಕುಟುಂಬ','ಗೆಳೆಯ','ಯಾರಾದರೂ','ತುರ್ತು'],
+    },
+    'Hindi': {
+        'Basic needs': ['पानी','खाना','दर्द','थका',
+                        'शौचालय','मदद','दवाई','नींद'],
+        'Emotions':    ['खुश','दुखी','डरा','गुस्सा',
+                        'प्यार','शांत','अकेला','उलझन'],
+        'Actions':     ['हाँ','नहीं','रुको','ठहरो',
+                        'आओ','जाओ','बुलाओ','दोबारा'],
+        'People':      ['डॉक्टर','नर्स','माँ','पिता',
+                        'परिवार','दोस्त','कोई भी','आपातकाल'],
+    }
 }
+
+# Active menus — default English
+MENUS = LANGUAGES['English']
 
 THOUGHT_TO_MENU = {
     0: 'Basic needs', 1: 'Emotions',
@@ -181,8 +206,53 @@ MENU_COLORS = {
     'Keyboard':    '#00d4aa'
 }
 
-# ── Alphabet keyboard layout ──────────────────────────────────
-# 28 keys: A-Z + SPACE + DELETE
+# ══════════════════════════════════════════════════════════════
+# Alert system
+# ══════════════════════════════════════════════════════════════
+ALERT_WORDS = [
+    'HELP','EMERGENCY','PAIN','CALL','DOCTOR',
+    'ಸಹಾಯ','ತುರ್ತು','ನೋವು','ಕರೆ','ವೈದ್ಯ',
+    'मदद','आपातकाल','दर्द','बुलाओ','डॉक्टर'
+]
+
+TWILIO_ENABLED  = False
+TWILIO_SID      = "YOUR_ACCOUNT_SID"
+TWILIO_TOKEN    = "YOUR_AUTH_TOKEN"
+TWILIO_FROM     = "whatsapp:+14155238886"
+CAREGIVER_PHONE = "whatsapp:+91XXXXXXXXXX"
+
+def send_alert(word, sentence):
+    print(f"🚨 ALERT: '{word}' detected — caregiver notified")
+    if TWILIO_ENABLED:
+        try:
+            from twilio.rest import Client
+            client = Client(TWILIO_SID, TWILIO_TOKEN)
+            client.messages.create(
+                body=(
+                    f"🚨 BCI ALERT — Patient needs attention!\n\n"
+                    f"Word: {word}\n"
+                    f"Sentence: {' '.join(sentence)}\n\n"
+                    f"Please respond immediately."
+                ),
+                from_=TWILIO_FROM,
+                to=CAREGIVER_PHONE
+            )
+            print("WhatsApp alert sent!")
+        except Exception as e:
+            print(f"Alert failed: {e}")
+
+def check_alert(word, sentence):
+    if word.upper() in [w.upper() for w in ALERT_WORDS]:
+        threading.Thread(
+            target=send_alert,
+            args=(word, sentence),
+            daemon=True).start()
+        return True
+    return False
+
+# ══════════════════════════════════════════════════════════════
+# Keyboard layout
+# ══════════════════════════════════════════════════════════════
 KEYBOARD_ROWS = [
     ['A','B','C','D','E','F','G'],
     ['H','I','J','K','L','M','N'],
@@ -191,7 +261,6 @@ KEYBOARD_ROWS = [
 ]
 KEYBOARD_KEYS = [k for row in KEYBOARD_ROWS for k in row]
 
-# Common words for autocomplete
 WORD_LIST = [
     'WATER','FOOD','HELP','PAIN','YES','NO','STOP',
     'COME','CALL','HAPPY','SAD','TIRED','SLEEP',
@@ -203,54 +272,49 @@ WORD_LIST = [
 ]
 
 def get_suggestions(current_word):
-    """Return up to 3 word completions for current typed letters"""
     if not current_word:
         return []
     prefix = current_word.upper()
-    matches = [w for w in WORD_LIST
-               if w.startswith(prefix) and w != prefix]
-    return matches[:3]
+    return [w for w in WORD_LIST
+            if w.startswith(prefix) and w != prefix][:3]
 
 # ══════════════════════════════════════════════════════════════
 # BCI State
 # ══════════════════════════════════════════════════════════════
 bci_state = {
-    'mode':           'menu',      # 'menu' or 'keyboard'
+    'mode':           'menu',
+    'language':       'English',
     'detected_word':  '',
     'detected_menu':  '',
     'thought_class':  '',
     'confidence':     0.0,
     'sentence':       [],
     'history':        [],
-    'status':         'Ready — tap Detect or switch to Keyboard',
+    'status':         'Ready — tap Detect Thought',
     'processing':     False,
-    # Keyboard specific
-    'current_word':   '',          # letters typed so far
-    'suggestions':    [],          # autocomplete suggestions
-    'typed_words':    [],          # completed words from keyboard
+    'is_alert':       False,
+    'current_word':   '',
+    'suggestions':    [],
+    'typed_words':    [],
 }
 
 def run_p300_detection(items, target_idx):
-    """Run P300 flashing on a list of items, return best index + confidence"""
     scores = np.zeros(len(items))
     for _ in range(2):
         for idx in range(len(items)):
-            is_target = (idx == target_idx)
-            epoch = generate_p300_epoch(is_target)
+            epoch = generate_p300_epoch(idx == target_idx)
             feat  = extract_rich_features(
                 epoch[np.newaxis])[0].reshape(1, -1)
             scores[idx] += lda.predict_proba(feat)[0][1]
-    avg        = scores / 2
-    best_idx   = int(np.argmax(avg))
-    confidence = float(avg[best_idx])
-    return best_idx, confidence
+    avg      = scores / 2
+    best_idx = int(np.argmax(avg))
+    return best_idx, float(avg[best_idx])
 
 def run_menu_pipeline():
-    """Motor imagery → menu → P300 → word"""
     bci_state['processing'] = True
+    bci_state['is_alert']   = False
     bci_state['status']     = '🧠 Reading brain signals...'
 
-    # Step 1 — motor imagery → menu
     thought_idx  = random.randint(0, 3)
     menu_name    = THOUGHT_TO_MENU[thought_idx]
     thought_name = CLASS_NAMES[thought_idx]
@@ -259,7 +323,6 @@ def run_menu_pipeline():
     bci_state['status'] = f'Thought: {thought_name} → {menu_name}'
     time.sleep(0.3)
 
-    # Step 2 — P300 → word selection
     words      = MENUS[menu_name]
     target_idx = random.randint(0, 7)
     best_idx, confidence = run_p300_detection(words, target_idx)
@@ -276,24 +339,27 @@ def run_menu_pipeline():
         'color':      MENU_COLORS[menu_name],
         'mode':       'menu'
     })
-    bci_state['history']    = bci_state['history'][:10]
-    bci_state['status']     = f'✓ Detected: {best_word}'
+    bci_state['history'] = bci_state['history'][:10]
+
+    # Alert check
+    is_alert = check_alert(best_word, bci_state['sentence'])
+    bci_state['is_alert'] = is_alert
+    bci_state['status']   = (
+        f'🚨 ALERT SENT — {best_word}!' if is_alert
+        else f'✓ Detected: {best_word}')
     bci_state['processing'] = False
 
 def run_keyboard_pipeline():
-    """P300 on alphabet keys → detect letter → build word"""
-    bci_state['processing']   = True
+    bci_state['processing']    = True
     bci_state['detected_menu'] = 'Keyboard'
     bci_state['status']        = '⌨️ Scanning keyboard...'
 
-    # P300 on 28 keys
-    target_idx = random.randint(0, len(KEYBOARD_KEYS) - 1)
+    target_idx = random.randint(0, len(KEYBOARD_KEYS)-1)
     best_idx, confidence = run_p300_detection(
         KEYBOARD_KEYS, target_idx)
     best_key = KEYBOARD_KEYS[best_idx]
 
     if best_key == '⎵':
-        # SPACE — complete current word and add to sentence
         word = bci_state['current_word'].strip()
         if word:
             bci_state['sentence'].append(word)
@@ -308,27 +374,24 @@ def run_keyboard_pipeline():
             })
         bci_state['current_word']  = ''
         bci_state['suggestions']   = []
-        bci_state['detected_word'] = f'[SPACE] → "{word}" added'
-        bci_state['status']        = f'✓ Word "{word}" added to sentence'
-
+        bci_state['detected_word'] = f'[SPACE] → "{word}"'
+        bci_state['status']        = f'✓ Word "{word}" added'
     elif best_key == '⌫':
-        # DELETE — remove last letter
         if bci_state['current_word']:
-            bci_state['current_word'] = bci_state['current_word'][:-1]
+            bci_state['current_word'] = \
+                bci_state['current_word'][:-1]
         bci_state['detected_word'] = '[DELETE]'
         bci_state['status']        = '⌫ Letter deleted'
         bci_state['suggestions']   = get_suggestions(
             bci_state['current_word'])
-
     else:
-        # Letter — add to current word
         bci_state['current_word'] += best_key
         bci_state['suggestions']   = get_suggestions(
             bci_state['current_word'])
         bci_state['detected_word'] = best_key
         bci_state['status'] = (
             f'✓ Letter: {best_key}  |  '
-            f'Word so far: {bci_state["current_word"]}')
+            f'Word: {bci_state["current_word"]}')
         bci_state['history'].insert(0, {
             'word':       best_key,
             'menu':       'Keyboard',
@@ -343,7 +406,7 @@ def run_keyboard_pipeline():
     bci_state['processing'] = False
 
 # ══════════════════════════════════════════════════════════════
-# HTML — full UI with keyboard mode
+# HTML
 # ══════════════════════════════════════════════════════════════
 HTML = """
 <!DOCTYPE html>
@@ -386,10 +449,23 @@ HTML = """
     }
     .header p { font-size:11px; color:var(--dim); }
 
-    /* Mode toggle */
-    .mode-toggle {
-      display:flex; gap:8px; margin-bottom:10px;
+    /* Language selector */
+    .lang-row {
+      display:flex; gap:6px; margin-bottom:10px;
     }
+    .lang-btn {
+      flex:1; padding:7px; border:1px solid var(--border);
+      border-radius:8px; font-size:11px; font-weight:600;
+      cursor:pointer; background:var(--card); color:var(--dim);
+      transition:all 0.2s;
+    }
+    .lang-btn.active {
+      background:var(--purple); color:white;
+      border-color:var(--purple);
+    }
+
+    /* Mode toggle */
+    .mode-toggle { display:flex; gap:8px; margin-bottom:10px; }
     .mode-btn {
       flex:1; padding:10px; border:none; border-radius:10px;
       font-size:12px; font-weight:700; cursor:pointer;
@@ -408,6 +484,12 @@ HTML = """
       border-radius:10px; padding:8px 14px;
       font-size:12px; color:var(--dim);
       text-align:center; margin-bottom:10px;
+      transition:border-color 0.3s;
+    }
+    .status.alert {
+      border-color:var(--red);
+      color:var(--red);
+      font-weight:700;
     }
 
     /* Word display */
@@ -415,19 +497,22 @@ HTML = """
       background:var(--card); border:1px solid var(--border);
       border-radius:14px; padding:18px 14px 14px;
       text-align:center; margin-bottom:10px;
+      transition:border-color 0.3s;
     }
+    .word-card.alert { border-color:var(--red); }
     .menu-chip {
       display:inline-block; font-size:10px; font-weight:600;
       padding:2px 10px; border-radius:20px; margin-bottom:10px;
     }
     .big-word {
-      font-size:48px; font-weight:800; color:var(--green);
-      letter-spacing:2px; min-height:56px; margin-bottom:12px;
-      transition:transform 0.2s;
+      font-size:44px; font-weight:800; color:var(--green);
+      letter-spacing:2px; min-height:52px; margin-bottom:12px;
+      transition:transform 0.2s, color 0.3s;
     }
+    .big-word.alert { color:var(--red); }
     .conf-track {
-      background:var(--bg); border-radius:4px; height:5px;
-      overflow:hidden; margin-bottom:4px;
+      background:var(--bg); border-radius:4px;
+      height:5px; overflow:hidden; margin-bottom:4px;
     }
     .conf-fill {
       height:100%; border-radius:4px;
@@ -435,6 +520,16 @@ HTML = """
       transition:width 0.5s ease;
     }
     .conf-label { font-size:10px; color:var(--dim); }
+
+    /* Alert banner */
+    .alert-banner {
+      display:none; background:#2a0a0a;
+      border:1px solid var(--red); border-radius:10px;
+      padding:10px 14px; margin-bottom:10px;
+      text-align:center; font-size:13px; font-weight:700;
+      color:var(--red);
+    }
+    .alert-banner.visible { display:block; }
 
     /* Sentence */
     .sentence-card {
@@ -450,11 +545,9 @@ HTML = """
       line-height:1.4; word-wrap:break-word;
     }
 
-    /* ── KEYBOARD ── */
+    /* Keyboard */
     .keyboard-section { display:none; }
     .keyboard-section.visible { display:block; }
-
-    /* Current word display */
     .word-builder {
       background:var(--card); border:1px solid var(--green);
       border-radius:12px; padding:12px 14px; margin-bottom:10px;
@@ -465,8 +558,7 @@ HTML = """
     }
     .wb-text {
       font-size:26px; font-weight:700;
-      color:var(--green); min-height:34px;
-      letter-spacing:4px;
+      color:var(--green); min-height:34px; letter-spacing:4px;
     }
     .wb-cursor {
       display:inline-block; width:2px; height:28px;
@@ -475,11 +567,8 @@ HTML = """
       vertical-align:bottom;
     }
     @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
-
-    /* Autocomplete suggestions */
     .suggestions {
-      display:flex; gap:6px; margin-bottom:10px;
-      flex-wrap:wrap;
+      display:flex; gap:6px; margin-bottom:10px; flex-wrap:wrap;
     }
     .suggestion-btn {
       background:#1a2a3a; border:1px solid var(--green);
@@ -487,11 +576,7 @@ HTML = """
       font-size:12px; font-weight:600; color:var(--green);
       cursor:pointer; transition:all 0.15s;
     }
-    .suggestion-btn:active {
-      background:var(--green); color:#0f0f1a;
-    }
-
-    /* Keyboard grid */
+    .suggestion-btn:active { background:var(--green); color:#0f0f1a; }
     .keyboard-grid { margin-bottom:10px; }
     .key-row {
       display:flex; gap:5px; margin-bottom:5px;
@@ -505,14 +590,10 @@ HTML = """
       background:#1a1a3a; color:var(--text);
     }
     .key:active { transform:scale(0.92); }
-    .key.flashing { background:#ffffff; color:#0f0f1a; }
     .key.selected-key { background:var(--green); color:#0f0f1a; }
     .key.space-key { width:60px; background:#1D9E75; color:white; font-size:10px; }
     .key.del-key   { width:60px; background:#D85A30; color:white; font-size:16px; }
-    .key-hint {
-      font-size:9px; color:var(--dim); text-align:center;
-      margin-bottom:8px;
-    }
+    .key-hint { font-size:9px; color:var(--dim); text-align:center; margin-bottom:8px; }
 
     /* Buttons */
     .btn-grid {
@@ -532,18 +613,16 @@ HTML = """
     }
     .btn:active { transform:scale(0.96); }
     .btn-icon { font-size:18px; }
-    .btn-detect { background:var(--purple); color:white;
-                  grid-column:1/-1; padding:18px; }
-    .btn-speak  { background:var(--teal);  color:white; }
-    .btn-repeat { background:#2a2a4a;      color:#a0a0ff; }
-    .btn-delete { background:var(--amber); color:white; }
-    .btn-clear  { background:#1a1a2e;
-                  border:1px solid var(--border); color:var(--dim); }
-    .btn-share  { background:#2a2a4a; color:#a0a0ff; }
-    .btn-scan   {
-      background:var(--green); color:#0f0f1a;
-      grid-column:1/-1; padding:18px;
-    }
+    .btn-detect  { background:var(--purple); color:white;
+                   grid-column:1/-1; padding:18px; }
+    .btn-speak   { background:var(--teal);   color:white; }
+    .btn-repeat  { background:#2a2a4a;       color:#a0a0ff; }
+    .btn-delete  { background:var(--amber);  color:white; }
+    .btn-clear   { background:#1a1a2e;
+                   border:1px solid var(--border); color:var(--dim); }
+    .btn-share   { background:#2a2a4a;       color:#a0a0ff; }
+    .btn-scan    { background:var(--green);  color:#0f0f1a;
+                   grid-column:1/-1; padding:18px; }
     .btn-add-word {
       background:#1a2a3a; border:1px solid var(--green);
       color:var(--green);
@@ -561,7 +640,6 @@ HTML = """
     .hist-item {
       display:flex; align-items:center; gap:8px;
       padding:5px 0; border-bottom:1px solid #0f0f1a;
-      font-size:11px;
     }
     .hist-item:last-child { border-bottom:none; }
     .hist-dot { width:7px; height:7px; border-radius:50%; flex-shrink:0; }
@@ -606,6 +684,16 @@ HTML = """
   </span>
 </div>
 
+<!-- Language selector -->
+<div class="lang-row">
+  <button class="lang-btn active" id="lang-en"
+          onclick="setLang('English')">🇬🇧 English</button>
+  <button class="lang-btn" id="lang-kn"
+          onclick="setLang('Kannada')">🇮🇳 ಕನ್ನಡ</button>
+  <button class="lang-btn" id="lang-hi"
+          onclick="setLang('Hindi')">🇮🇳 हिंदी</button>
+</div>
+
 <!-- Mode toggle -->
 <div class="mode-toggle">
   <button class="mode-btn mode-menu active" id="btn-mode-menu"
@@ -618,12 +706,20 @@ HTML = """
   </button>
 </div>
 
+<!-- Status -->
 <div class="status" id="status">Ready — tap Detect Thought</div>
 
+<!-- Alert banner -->
+<div class="alert-banner" id="alert-banner">
+  🚨 EMERGENCY ALERT SENT TO CAREGIVER 🚨
+</div>
+
 <!-- Word display -->
-<div class="word-card">
+<div class="word-card" id="word-card">
   <div class="menu-chip" id="menu-chip"
-       style="background:#2a2a4a;color:#8080b0">No menu open</div>
+       style="background:#2a2a4a;color:#8080b0">
+    No menu open
+  </div>
   <div class="big-word" id="big-word">---</div>
   <div class="conf-track">
     <div class="conf-fill" id="conf-fill" style="width:0%"></div>
@@ -631,26 +727,20 @@ HTML = """
   <div class="conf-label" id="conf-label">Confidence: ---</div>
 </div>
 
-<!-- ══ KEYBOARD SECTION ══ -->
+<!-- Keyboard section -->
 <div class="keyboard-section" id="keyboard-section">
-
-  <!-- Current word being built -->
   <div class="word-builder">
     <div class="wb-label">SPELLING</div>
-    <div class="wb-text" id="wb-text">
+    <div class="wb-text">
       <span id="wb-letters"></span>
       <span class="wb-cursor"></span>
     </div>
   </div>
-
-  <!-- Autocomplete suggestions -->
   <div class="suggestions" id="suggestions"></div>
-
-  <!-- Keyboard grid -->
   <div class="keyboard-grid" id="keyboard-grid"></div>
-  <div class="key-hint">Tap "Scan Keyboard" to detect which letter you're focusing on</div>
-
-  <!-- Keyboard actions -->
+  <div class="key-hint">
+    Tap "Scan Keyboard" to detect your focused letter via P300
+  </div>
   <div class="btn-grid" style="margin-bottom:8px">
     <button class="btn btn-scan" id="scan-btn"
             onclick="scanKeyboard()">
@@ -668,7 +758,6 @@ HTML = """
       Delete Letter
     </button>
   </div>
-
 </div>
 
 <!-- Sentence -->
@@ -679,7 +768,7 @@ HTML = """
   </div>
 </div>
 
-<!-- ══ MENU MODE BUTTONS ══ -->
+<!-- Menu detect buttons -->
 <div id="menu-buttons">
   <div class="btn-grid" style="margin-bottom:8px">
     <button class="btn btn-detect" id="detect-btn"
@@ -700,7 +789,7 @@ HTML = """
   </div>
 </div>
 
-<!-- Common buttons (both modes) -->
+<!-- Common buttons -->
 <div class="btn-grid-3" style="margin-top:8px">
   <button class="btn btn-delete" onclick="deleteLast()">
     <span class="btn-icon">⬅️</span>
@@ -720,28 +809,30 @@ HTML = """
 <div class="history-card">
   <div class="history-label">HISTORY</div>
   <div id="history-list">
-    <div style="color:var(--dim);font-size:11px">No detections yet</div>
+    <div style="color:var(--dim);font-size:11px">
+      No detections yet
+    </div>
   </div>
 </div>
 
 <script>
-const synth = window.speechSynthesis;
+const synth   = window.speechSynthesis;
 let lastWord  = '';
 let curMode   = 'menu';
+let curLang   = 'English';
 
 const MENU_COLORS = {
   'Basic needs':'#534AB7','Emotions':'#1D9E75',
   'Actions':'#BA7517','People':'#D85A30','Keyboard':'#00d4aa'
 };
 
-// ── Build keyboard grid ────────────────────────────────────
+// ── Build keyboard ─────────────────────────────────────────
 const ROWS = [
   ['A','B','C','D','E','F','G'],
   ['H','I','J','K','L','M','N'],
   ['O','P','Q','R','S','T','U'],
   ['V','W','X','Y','Z','⎵','⌫'],
 ];
-const ALL_KEYS = ROWS.flat();
 
 function buildKeyboard() {
   const grid = document.getElementById('keyboard-grid');
@@ -752,11 +843,11 @@ function buildKeyboard() {
     row.forEach(k => {
       const btn = document.createElement('button');
       btn.className = 'key' +
-        (k === '⎵' ? ' space-key' : '') +
-        (k === '⌫' ? ' del-key'   : '');
-      btn.id        = `key-${k}`;
-      btn.textContent = k === '⎵' ? 'SPC' : k;
-      btn.onclick   = () => manualKeyPress(k);
+        (k==='⎵' ? ' space-key':'') +
+        (k==='⌫' ? ' del-key':'');
+      btn.id          = `key-${k}`;
+      btn.textContent = k==='⎵' ? 'SPC' : k;
+      btn.onclick     = () => manualKeyPress(k);
       rowDiv.appendChild(btn);
     });
     grid.appendChild(rowDiv);
@@ -764,27 +855,61 @@ function buildKeyboard() {
 }
 buildKeyboard();
 
-// ── Mode switching ─────────────────────────────────────────
+// ── Language ───────────────────────────────────────────────
+function setLang(lang) {
+  curLang = lang;
+  ['en','kn','hi'].forEach(l =>
+    document.getElementById(`lang-${l}`).classList.remove('active'));
+  const map = {'English':'en','Kannada':'kn','Hindi':'hi'};
+  document.getElementById(`lang-${map[lang]}`).classList.add('active');
+  fetch('/set_language', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({language: lang})
+  }).then(r => r.json()).then(data => {
+    updateUI(data);
+    document.getElementById('status').textContent =
+      `Language: ${lang}`;
+    // Update speech lang
+    speechLang = lang==='Hindi' ? 'hi-IN' :
+                 lang==='Kannada' ? 'kn-IN' : 'en-US';
+  });
+}
+let speechLang = 'en-US';
+
+// ── Mode switch ────────────────────────────────────────────
 function switchMode(mode) {
   curMode = mode;
-  document.getElementById('btn-mode-menu').classList
-    .toggle('active', mode === 'menu');
-  document.getElementById('btn-mode-key').classList
-    .toggle('active', mode === 'keyboard');
-  document.getElementById('keyboard-section').classList
-    .toggle('visible', mode === 'keyboard');
+  document.getElementById('btn-mode-menu')
+    .classList.toggle('active', mode==='menu');
+  document.getElementById('btn-mode-key')
+    .classList.toggle('active', mode==='keyboard');
+  document.getElementById('keyboard-section')
+    .classList.toggle('visible', mode==='keyboard');
   document.getElementById('menu-buttons').style.display =
-    mode === 'menu' ? 'block' : 'none';
+    mode==='menu' ? 'block' : 'none';
   document.getElementById('status').textContent =
-    mode === 'menu'
+    mode==='menu'
       ? 'Menu mode — tap Detect Thought'
       : 'Keyboard mode — tap Scan Keyboard';
 }
 
 // ── Update UI ──────────────────────────────────────────────
 function updateUI(data) {
-  document.getElementById('status').textContent = data.status;
+  // Status
+  const statusEl = document.getElementById('status');
+  statusEl.textContent = data.status;
+  statusEl.className = 'status' + (data.is_alert ? ' alert' : '');
 
+  // Alert banner
+  document.getElementById('alert-banner').className =
+    'alert-banner' + (data.is_alert ? ' visible' : '');
+
+  // Word card
+  const card = document.getElementById('word-card');
+  card.className = 'word-card' + (data.is_alert ? ' alert' : '');
+
+  // Menu chip
   const chip  = document.getElementById('menu-chip');
   const color = MENU_COLORS[data.detected_menu] || '#2a2a4a';
   chip.textContent      = data.detected_menu || 'No menu open';
@@ -792,15 +917,20 @@ function updateUI(data) {
   chip.style.color      = color || '#8080b0';
   chip.style.border     = `1px solid ${color}44`;
 
+  // Big word
   const wordEl = document.getElementById('big-word');
-  if (data.detected_word && data.detected_word !== wordEl.textContent) {
+  if (data.detected_word &&
+      data.detected_word !== wordEl.textContent) {
     wordEl.style.transform = 'scale(1.12)';
     setTimeout(() => wordEl.style.transform = 'scale(1)', 250);
   }
   wordEl.textContent = data.detected_word || '---';
-  wordEl.style.color = data.detected_word ? '#00d4aa' : '#404060';
+  wordEl.className   = 'big-word' + (data.is_alert ? ' alert' : '');
+  if (!data.is_alert)
+    wordEl.style.color = data.detected_word ? '#00d4aa' : '#404060';
   lastWord = data.detected_word || lastWord;
 
+  // Confidence
   const conf = Math.round(data.confidence * 100);
   document.getElementById('conf-fill').style.width = conf + '%';
   document.getElementById('conf-label').textContent =
@@ -810,7 +940,7 @@ function updateUI(data) {
   document.getElementById('sentence-text').textContent =
     data.sentence.join('  ') || 'Words appear here...';
 
-  // Keyboard state
+  // Keyboard
   document.getElementById('wb-letters').textContent =
     data.current_word || '';
 
@@ -830,29 +960,32 @@ function updateUI(data) {
   // History
   let html = '';
   if (data.history && data.history.length > 0) {
-    data.history.slice(0, 6).forEach(h => {
+    data.history.slice(0,6).forEach(h => {
       html += `
         <div class="hist-item">
-          <div class="hist-dot" style="background:${h.color}"></div>
-          <div class="hist-word" style="color:${h.color}">${h.word}</div>
+          <div class="hist-dot"
+               style="background:${h.color}"></div>
+          <div class="hist-word"
+               style="color:${h.color}">${h.word}</div>
           <div class="hist-meta">${h.thought}</div>
           <div class="hist-meta">${h.confidence}</div>
         </div>`;
     });
   } else {
-    html = '<div style="color:var(--dim);font-size:11px">No detections yet</div>';
+    html = '<div style="color:var(--dim);font-size:11px">' +
+           'No detections yet</div>';
   }
   document.getElementById('history-list').innerHTML = html;
 }
 
-// ── Menu mode ──────────────────────────────────────────────
+// ── Detect thought ─────────────────────────────────────────
 function setDetectBtn(loading) {
   const btn = document.getElementById('detect-btn');
   if (btn) {
     btn.innerHTML = loading
       ? '<span class="spinner"></span> Reading...'
       : '<span class="btn-icon">🧠</span> Detect Thought';
-    btn.disabled      = loading;
+    btn.disabled = loading;
     btn.style.opacity = loading ? '0.7' : '1';
   }
 }
@@ -864,51 +997,44 @@ function detectThought() {
     .then(data => {
       setDetectBtn(false);
       updateUI(data);
-      if (data.detected_word &&
-          !data.detected_word.startsWith('[')) {
+      if (data.detected_word && !data.detected_word.startsWith('['))
         speak(data.detected_word.toLowerCase());
-      }
+      if (data.is_alert)
+        navigator.vibrate && navigator.vibrate([500,200,500]);
     })
     .catch(() => setDetectBtn(false));
 }
 
-// ── Keyboard mode ──────────────────────────────────────────
+// ── Keyboard scan ──────────────────────────────────────────
 function setScanBtn(loading) {
   const btn = document.getElementById('scan-btn');
   if (btn) {
     btn.innerHTML = loading
       ? '<span class="spinner"></span> Scanning...'
       : '<span class="btn-icon">👁️</span> Scan Keyboard';
-    btn.disabled      = loading;
+    btn.disabled = loading;
     btn.style.opacity = loading ? '0.7' : '1';
   }
 }
 
 function scanKeyboard() {
   setScanBtn(true);
-  document.getElementById('status').textContent =
-    '👁️ Scanning keyboard — focus on your letter...';
   fetch('/keyboard_scan', {method:'POST'})
     .then(r => r.json())
     .then(data => {
       setScanBtn(false);
       updateUI(data);
-      // Flash selected key
       flashKey(data.detected_word);
-      // Speak letter
-      if (data.detected_word && data.detected_word.length === 1) {
+      if (data.detected_word && data.detected_word.length===1)
         speak(data.detected_word.toLowerCase());
-      }
     })
     .catch(() => setScanBtn(false));
 }
 
 function flashKey(key) {
-  // Remove all previous selections
-  document.querySelectorAll('.key').forEach(k => {
-    k.classList.remove('selected-key');
-  });
-  if (key && key.length === 1) {
+  document.querySelectorAll('.key').forEach(k =>
+    k.classList.remove('selected-key'));
+  if (key && key.length===1) {
     const el = document.getElementById(`key-${key}`);
     if (el) {
       el.classList.add('selected-key');
@@ -918,14 +1044,13 @@ function flashKey(key) {
 }
 
 function manualKeyPress(key) {
-  // Allow manual key press for demo/testing
   fetch('/manual_key', {
     method:'POST',
     headers:{'Content-Type':'application/json'},
     body: JSON.stringify({key: key})
   }).then(r => r.json()).then(data => {
     updateUI(data);
-    if (key.length === 1) speak(key.toLowerCase());
+    if (key.length===1) speak(key.toLowerCase());
   });
 }
 
@@ -943,8 +1068,7 @@ function addWordToSentence() {
 
 function deleteLastLetter() {
   fetch('/delete_letter', {method:'POST'})
-    .then(r => r.json())
-    .then(data => updateUI(data));
+    .then(r => r.json()).then(data => updateUI(data));
 }
 
 function acceptSuggestion(word) {
@@ -958,7 +1082,7 @@ function acceptSuggestion(word) {
   });
 }
 
-// ── Common actions ─────────────────────────────────────────
+// ── Common ─────────────────────────────────────────────────
 function speakSentence() {
   fetch('/state').then(r => r.json()).then(data => {
     const s = data.sentence.join(' ').toLowerCase();
@@ -967,9 +1091,8 @@ function speakSentence() {
 }
 
 function repeatWord() {
-  if (lastWord && !lastWord.startsWith('[')) {
+  if (lastWord && !lastWord.startsWith('['))
     speak(lastWord.toLowerCase());
-  }
 }
 
 function deleteLast() {
@@ -987,20 +1110,20 @@ function clearAll() {
 function shareSentence() {
   fetch('/state').then(r => r.json()).then(data => {
     const text = data.sentence.join(' ');
-    if (navigator.share && text) {
+    if (navigator.share && text)
       navigator.share({title:'BCI Message', text:text});
-    } else if (text) {
+    else if (text)
       navigator.clipboard.writeText(text).then(() => {
         document.getElementById('status').textContent =
-          '📋 Copied to clipboard!';
+          '📋 Copied!';
       });
-    }
   });
 }
 
 function speak(text) {
   synth.cancel();
   const utt  = new SpeechSynthesisUtterance(text);
+  utt.lang   = speechLang;
   utt.rate   = 0.85;
   utt.volume = 1.0;
   synth.speak(utt);
@@ -1041,9 +1164,19 @@ def keyboard_scan():
         run_keyboard_pipeline()
     return jsonify(bci_state)
 
+@app.route('/set_language', methods=['POST'])
+def set_language():
+    global MENUS
+    data = request.get_json()
+    lang = data.get('language', 'English')
+    if lang in LANGUAGES:
+        MENUS = LANGUAGES[lang]
+        bci_state['language'] = lang
+        bci_state['status']   = f'Language: {lang}'
+    return jsonify(bci_state)
+
 @app.route('/manual_key', methods=['POST'])
 def manual_key():
-    """Manual key press for testing without hardware"""
     data = request.get_json()
     key  = data.get('key', '')
     if key == '⎵':
@@ -1053,18 +1186,22 @@ def manual_key():
             bci_state['typed_words'].append(word)
         bci_state['current_word'] = ''
         bci_state['suggestions']  = []
-        bci_state['detected_word'] = f'[SPACE]'
+        bci_state['detected_word'] = '[SPACE]'
         bci_state['status'] = f'Word "{word}" added'
     elif key == '⌫':
         if bci_state['current_word']:
-            bci_state['current_word'] = bci_state['current_word'][:-1]
-        bci_state['suggestions'] = get_suggestions(bci_state['current_word'])
+            bci_state['current_word'] = \
+                bci_state['current_word'][:-1]
+        bci_state['suggestions'] = get_suggestions(
+            bci_state['current_word'])
         bci_state['detected_word'] = '[DELETE]'
     else:
         bci_state['current_word'] += key
-        bci_state['suggestions']   = get_suggestions(bci_state['current_word'])
+        bci_state['suggestions']   = get_suggestions(
+            bci_state['current_word'])
         bci_state['detected_word'] = key
-        bci_state['status'] = f'Letter: {key} | Word: {bci_state["current_word"]}'
+        bci_state['status'] = (
+            f'Letter: {key} | Word: {bci_state["current_word"]}')
     return jsonify(bci_state)
 
 @app.route('/add_word', methods=['POST'])
@@ -1081,7 +1218,7 @@ def add_word():
             'color':      '#00d4aa',
             'mode':       'keyboard'
         })
-        bci_state['status'] = f'✓ "{word}" added to sentence'
+        bci_state['status'] = f'✓ "{word}" added'
     bci_state['current_word'] = ''
     bci_state['suggestions']  = []
     return jsonify(bci_state)
@@ -1097,13 +1234,13 @@ def delete_letter():
 @app.route('/accept_suggestion', methods=['POST'])
 def accept_suggestion():
     data = request.get_json()
-    word = data.get('word', '').upper()
+    word = data.get('word','').upper()
     bci_state['sentence'].append(word)
     bci_state['typed_words'].append(word)
     bci_state['current_word'] = ''
     bci_state['suggestions']  = []
     bci_state['detected_word'] = word
-    bci_state['status'] = f'✓ Suggestion "{word}" added'
+    bci_state['status'] = f'✓ "{word}" added'
     bci_state['history'].insert(0, {
         'word':       word,
         'menu':       'Keyboard',
@@ -1132,11 +1269,12 @@ def clear():
     bci_state['current_word']  = ''
     bci_state['suggestions']   = []
     bci_state['typed_words']   = []
-    bci_state['status']        = 'Ready — tap Detect or switch to Keyboard'
+    bci_state['is_alert']      = False
+    bci_state['status']        = 'Ready — tap Detect Thought'
     return jsonify(bci_state)
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    print(f"\nBCI Keyboard server running!")
-    print(f"Open: http://localhost:{port}")
+    print(f"\nBCI server running on port {port}")
+    print(f"Features: multilingual + alerts + keyboard")
     app.run(host='0.0.0.0', port=port, debug=False)

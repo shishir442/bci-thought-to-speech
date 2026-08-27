@@ -1043,7 +1043,7 @@ const MENU_COLORS = {
 const KN_SPEAK = {
   'ನೀರು':'neeru',      'ಊಟ':'oota',
   'ನೋವು':'novu',       'ಆಯಾಸ':'aayaasa',
-  'ಶೌಚಾಲಯ':'shouchalaya','ಸಹಾಯ':'sahaaya',
+  'ಶೌಚಾಲಯ':'Śaucālaya','ಸಹಾಯ':'sahaaya',
   'ಔಷಧಿ':'aushadhi',   'ನಿದ್ರೆ':'nidre',
   'ಖುಷಿ':'khushi',     'ದುಃಖ':'dukha',
   'ಭಯ':'bhaya',        'ಕೋಪ':'kopa',
